@@ -111,6 +111,7 @@ if st.button("Process Files"):
         file_labels = []
         overall_min_range = float('inf')
         overall_max_range = float('-inf')
+        plot_data = BytesIO()  # BytesIO for the plot image
 
         for uploaded_file in uploaded_files:
             file_extension = os.path.splitext(uploaded_file.name)[1]  # Get the file extension
@@ -200,8 +201,20 @@ if st.button("Process Files"):
             # Position the legend outside the plot
             ax.legend(loc="upper left", bbox_to_anchor=(1, 1), title="Files")  # Adjust position
 
+            # Save the plot to BytesIO for downloading
+            fig.savefig(plot_data, format="png", bbox_inches="tight")
+            plot_data.seek(0)
+
             # Display the plot
             st.pyplot(fig)
+
+            # Add a download button for the plot
+            st.download_button(
+                label="Download Plot",
+                data=plot_data,
+                file_name="plot.png",
+                mime="image/png",
+            )
         else:
             st.warning("No valid data to plot.")
 
