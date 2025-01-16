@@ -6,27 +6,34 @@ import matplotlib.pyplot as plt
 from io import BytesIO
 import os
 
-# Symbol-to-digit mapping
-symbol_map = {
-    "°": "0",
-    "¹": "9",
-    "³": "3",
-    "µ": "5",
-    "¶": "6",
-    "®": ".",  # Represents a period
+# Default number-to-symbol mapping
+default_symbol_map = {
+    "0": "°",
     "1": "1",
     "2": "2",
+    "3": "³",
     "4": "4",
+    "5": "µ",
+    "6": "¶",
     "7": "7",
-    "8": "8"
+    "8": "8",
+    "9": "¹",
+    ".": "®"  # Represents a period
 }
 
+def convert_digits_to_symbols(text, symbol_map):
+    """
+    Converts digits to their corresponding symbols and ensures the resulting
+    text is numeric by replacing symbols back to digits.
+    """
+    # Replace numbers with symbols
+    replaced_text = ''.join(symbol_map.get(char, char) for char in text)
+    # Replace symbols back to digits
+    reversed_map = {v: k for k, v in symbol_map.items()}  # Reverse mapping
+    return ''.join(reversed_map.get(char, char) for char in replaced_text)
 
-def convert_symbols_to_digits(text):
-    """Converts special symbols to digits based on the mapping."""
-    return ''.join(symbol_map.get(char, char) for char in text)
 
-def process_odt_file(uploaded_file):
+def process_odt_file(uploaded_file, symbol_map):
     """Processes the uploaded .odt file and converts its content."""
     doc = load(uploaded_file)
     paragraphs = doc.getElementsByType(P)
@@ -38,22 +45,26 @@ def process_odt_file(uploaded_file):
         text_elements = paragraph.childNodes
         text = "".join([node.data for node in text_elements if node.nodeType == 3])  # Extract text nodes only
         if text.strip():  # Ignore empty lines
-            converted_text = convert_symbols_to_digits(text)
-            # Split into columns, and ensure exactly two columns (Range and Percentage)
+            # Convert digits to symbols and then back to numbers
+            converted_text = convert_digits_to_symbols(text, symbol_map)
+            # Split into columns and ensure exactly two columns (Wavelength and Percentage)
             split_text = converted_text.split()
-            if len(split_text) == 2:  # Only accept rows with exactly two elements
-                rows.append(split_text)
+            if len(split_text) == 2:
+                try:
+                    # Convert both columns to numbers
+                    range_val = float(split_text[0])
+                    percentage_val = float(split_text[1])
+                    rows.append([range_val, percentage_val])
+                except ValueError:
+                    st.warning(f"Skipping non-numeric row: {converted_text}")
             else:
-                # Log or handle rows with unexpected number of columns (optional)
                 st.warning(f"Skipping malformed row: {converted_text}")
 
     # Convert to DataFrame
     if not rows:
         raise ValueError("No valid data found in the file.")
-    df = pd.DataFrame(rows, columns=["Range", "Percentage"])
-    df["Range"] = pd.to_numeric(df["Range"], errors="coerce")  # Ensure numeric types
-    df["Percentage"] = pd.to_numeric(df["Percentage"], errors="coerce")
-    return df.dropna()  # Drop rows with NaN
+    df = pd.DataFrame(rows, columns=["Wavelength", "Percentage"])
+    return df
 
 def save_to_excel(dataframes, file_names):
     """Saves multiple DataFrames to a single Excel file with each file as a sheet."""
@@ -65,8 +76,28 @@ def save_to_excel(dataframes, file_names):
     return output
 
 # Streamlit UI
-st.title("ODT File Plotter and Exporter")
+st.title("Spectrophotometer Data Plotter")
 st.write("Upload multiple `.odt` files to plot data and export as Excel.")
+
+# Symbol map editor
+st.sidebar.header("Customize Symbol Mapping")
+symbol_map = st.sidebar.text_area(
+    "Number-to-Symbol Map (JSON format)",
+    value=str(default_symbol_map),
+    help="Enter the mapping in JSON format. Keys should be numbers (e.g., '1'), and values should be symbols."
+)
+
+try:
+    # Convert user-provided JSON string into a dictionary
+    symbol_map = eval(symbol_map)
+    if not isinstance(symbol_map, dict):
+        raise ValueError
+except Exception:
+    st.sidebar.error("Invalid dictionary format. Please provide a valid JSON-like dictionary.")
+    symbol_map = default_symbol_map
+
+st.sidebar.write("Current Symbol Map:")
+st.sidebar.json(symbol_map)
 
 # File uploader for multiple files
 uploaded_files = st.file_uploader("Upload your `.odt` files", type=["odt"], accept_multiple_files=True)
@@ -81,12 +112,21 @@ if uploaded_files:
         # Process each file
         file_name = os.path.splitext(uploaded_file.name)[0]  # Get file name without extension
         file_labels.append(file_name)
-        df = process_odt_file(uploaded_file)
-        all_dataframes.append(df)
+        try:
+            df = process_odt_file(uploaded_file, symbol_map)
+            all_dataframes.append(df)
 
-        # Update overall min and max range
-        overall_min_range = min(overall_min_range, df["Range"].min())
-        overall_max_range = max(overall_max_range, df["Range"].max())
+            # Update overall min and max range
+            overall_min_range = min(overall_min_range, df["Wavelength"].min())
+            overall_max_range = max(overall_max_range, df["Wavelength"].max())
+        except Exception as e:
+            st.error(f"Error processing file {uploaded_file.name}: {e}")
+
+    # Ensure valid defaults for range inputs
+    if overall_min_range == float('inf'):
+        overall_min_range = 0.0  # Default minimum range if no data is available
+    if overall_max_range == float('-inf'):
+        overall_max_range = 100.0  # Default maximum range if no data is available
 
     # Default range inputs based on data
     min_range = st.number_input("Enter minimum range for the plot:", value=overall_min_range, step=1.0)
@@ -96,11 +136,11 @@ if uploaded_files:
     fig, ax = plt.subplots()
 
     for df, file_label in zip(all_dataframes, file_labels):
-        ax.plot(df["Range"], df["Percentage"], label=file_label)
+        ax.plot(df["Wavelength"], df["Percentage"], label=file_label)
 
     # Customize plot
     ax.set_xlim(min_range, max_range)
-    ax.set_xlabel("Range")
+    ax.set_xlabel("Wavelength")
     ax.set_ylabel("Percentage")
     ax.legend()
     ax.grid(True)
