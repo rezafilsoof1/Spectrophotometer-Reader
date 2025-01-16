@@ -1,6 +1,4 @@
 import streamlit as st
-from odf.opendocument import load
-from odf.text import P
 import pandas as pd
 import matplotlib.pyplot as plt
 from io import BytesIO
@@ -32,39 +30,48 @@ def convert_digits_to_symbols(text, symbol_map):
     reversed_map = {v: k for k, v in symbol_map.items()}  # Reverse mapping
     return ''.join(reversed_map.get(char, char) for char in replaced_text)
 
+def process_txt_file(uploaded_file, symbol_map):
+    """Processes a .txt file and converts its content."""
+    try:
+        # Attempt to read the .txt file with flexible encoding
+        df = pd.read_csv(uploaded_file, delim_whitespace=True, header=None, encoding="latin1")
 
-def process_odt_file(uploaded_file, symbol_map):
-    """Processes the uploaded .odt file and converts its content."""
-    doc = load(uploaded_file)
-    paragraphs = doc.getElementsByType(P)
+        # Check the number of columns in the file
+        num_columns = df.shape[1]
+        if num_columns == 1:
+            # Single-column file
+            df.columns = ["Column1"]
+            df["Column1"] = df["Column1"].apply(
+                lambda x: convert_digits_to_symbols(str(x), symbol_map)
+            )
+        elif num_columns == 2:
+            # Two-column file
+            df.columns = ["Column1", "Column2"]
+            df["Column1"] = df["Column1"].apply(
+                lambda x: convert_digits_to_symbols(str(x), symbol_map)
+            )
+            df["Column2"] = df["Column2"].apply(
+                lambda x: convert_digits_to_symbols(str(x), symbol_map)
+            )
+        else:
+            raise ValueError("Unsupported number of columns. Expected 1 or 2 columns.")
 
-    # Extract and process text
-    rows = []
-    for paragraph in paragraphs:
-        # Get the text content from the paragraph
-        text_elements = paragraph.childNodes
-        text = "".join([node.data for node in text_elements if node.nodeType == 3])  # Extract text nodes only
-        if text.strip():  # Ignore empty lines
-            # Convert digits to symbols and then back to numbers
-            converted_text = convert_digits_to_symbols(text, symbol_map)
-            # Split into columns and ensure exactly two columns (Wavelength and Percentage)
-            split_text = converted_text.split()
-            if len(split_text) == 2:
-                try:
-                    # Convert both columns to numbers
-                    range_val = float(split_text[0])
-                    percentage_val = float(split_text[1])
-                    rows.append([range_val, percentage_val])
-                except ValueError:
-                    st.warning(f"Skipping non-numeric row: {converted_text}")
-            else:
-                st.warning(f"Skipping malformed row: {converted_text}")
+        # Convert mapped values to floats where appropriate, filtering invalid rows
+        df["Column1"] = pd.to_numeric(df["Column1"], errors="coerce")
+        if "Column2" in df:
+            df["Column2"] = pd.to_numeric(df["Column2"], errors="coerce")
 
-    # Convert to DataFrame
-    if not rows:
-        raise ValueError("No valid data found in the file.")
-    df = pd.DataFrame(rows, columns=["Wavelength", "Percentage"])
-    return df
+        # Drop rows with invalid numeric data
+        df = df.dropna().reset_index(drop=True)
+
+        return df
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"Encoding issue: {e}. Ensure the file encoding is compatible or try converting it to UTF-8."
+        )
+    except Exception as e:
+        raise ValueError(f"Error processing .txt file: {e}")
+
 
 def save_to_excel(dataframes, file_names):
     """Saves multiple DataFrames to a single Excel file with each file as a sheet."""
@@ -77,7 +84,7 @@ def save_to_excel(dataframes, file_names):
 
 # Streamlit UI
 st.title("Spectrophotometer Data Plotter")
-st.write("Upload multiple `.odt` files to plot data and export as Excel.")
+st.write("Upload `.odt` files or files without extensions to plot data and export as Excel.")
 
 # Symbol map editor
 st.sidebar.header("Customize Symbol Mapping")
@@ -100,7 +107,7 @@ st.sidebar.write("Current Symbol Map:")
 st.sidebar.json(symbol_map)
 
 # File uploader for multiple files
-uploaded_files = st.file_uploader("Upload your `.odt` files", type=["odt"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload your files (.odt or without extensions)", type=None, accept_multiple_files=True)
 
 if uploaded_files:
     all_dataframes = []
@@ -109,44 +116,60 @@ if uploaded_files:
     overall_max_range = float('-inf')
 
     for uploaded_file in uploaded_files:
-        # Process each file
-        file_name = os.path.splitext(uploaded_file.name)[0]  # Get file name without extension
+        # Handle files with no extensions by assigning a .txt extension
+        if not os.path.splitext(uploaded_file.name)[1]:  # No extension
+            uploaded_file.name += ".txt"
+        else:
+            # Change .odt extensions to .txt
+            uploaded_file.name = os.path.splitext(uploaded_file.name)[0] + ".txt"
+
+        file_name = os.path.splitext(uploaded_file.name)[0]  # File name without extension
         file_labels.append(file_name)
+
         try:
-            df = process_odt_file(uploaded_file, symbol_map)
-            all_dataframes.append(df)
+            # Process each file as a .txt file
+            df = process_txt_file(uploaded_file, symbol_map)
+            if not df.empty:  # Check if the DataFrame is not empty
+                all_dataframes.append(df)
 
-            # Update overall min and max range
-            overall_min_range = min(overall_min_range, df["Wavelength"].min())
-            overall_max_range = max(overall_max_range, df["Wavelength"].max())
+                # Update overall min and max range
+                overall_min_range = min(overall_min_range, df["Column1"].min())
+                if "Column2" in df:
+                    overall_max_range = max(overall_max_range, df["Column2"].max())
         except Exception as e:
-            st.error(f"Error processing file {uploaded_file.name}: {e}")
+            st.error(f"Error processing file '{uploaded_file.name}': {e}")
 
-    # Ensure valid defaults for range inputs
-    if overall_min_range == float('inf'):
-        overall_min_range = 0.0  # Default minimum range if no data is available
-    if overall_max_range == float('-inf'):
-        overall_max_range = 100.0  # Default maximum range if no data is available
+    # # Ensure valid defaults for range inputs
+    # if overall_min_range == float('inf'):
+    #     overall_min_range = 0.0  # Default minimum range if no data is available
+    # if overall_max_range == float('-inf'):
+    #     overall_max_range = 100.0  # Default maximum range if no data is available
 
-    # Default range inputs based on data
-    min_range = st.number_input("Enter minimum range for the plot:", value=overall_min_range, step=1.0)
-    max_range = st.number_input("Enter maximum range for the plot:", value=overall_max_range, step=1.0)
+    overall_min_range = 190.0
+    overall_max_range = 1100.0
 
-    # Plot the data
-    fig, ax = plt.subplots()
+    if all_dataframes:  # Ensure there is valid data for plotting
+        # Default range inputs based on data
+        min_range = st.number_input("Enter minimum range for the plot:", value=overall_min_range, step=1.0)
+        max_range = st.number_input("Enter maximum range for the plot:", value=overall_max_range, step=1.0)
 
-    for df, file_label in zip(all_dataframes, file_labels):
-        ax.plot(df["Wavelength"], df["Percentage"], label=file_label)
+        # Plot the data
+        fig, ax = plt.subplots()
 
-    # Customize plot
-    ax.set_xlim(min_range, max_range)
-    ax.set_xlabel("Wavelength")
-    ax.set_ylabel("Percentage")
-    ax.legend()
-    ax.grid(True)
+        for df, file_label in zip(all_dataframes, file_labels):
+            ax.plot(df["Column1"], df["Column2"], label=file_label)
 
-    # Display the plot
-    st.pyplot(fig)
+        # Customize plot
+        ax.set_xlim(min_range, max_range)
+        ax.set_xlabel("Wavelength")
+        ax.set_ylabel("Percentage")
+        ax.legend()
+        ax.grid(True)
+
+        # Display the plot
+        st.pyplot(fig)
+    else:
+        st.warning("No valid data to plot.")
 
     # Save all dataframes to Excel
     excel_data = save_to_excel(all_dataframes, file_labels)
